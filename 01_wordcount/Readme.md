@@ -68,7 +68,7 @@ fun main() {
 
 fun runJob() {
     val source = KafkaSource.builder<String>()
-        .setBootstrapServers("localhost:9092")
+        .setBootstrapServers("localhost:19092")
         .setTopics(TOPIC)
         .setStartingOffsets(OffsetsInitializer.earliest())
         .setValueOnlyDeserializer(SimpleStringSchema())
@@ -105,7 +105,7 @@ fun defineWorkflow(
 class Tokenizer : FlatMapFunction<String, Event> {
     override fun flatMap(line: String, out: Collector<Event>) {
         line.lowercase()
-            .split("\\W+")
+            .split("\\W+".toRegex())
             .forEach { word ->
                 out.collect(Event(word, 1))
             }
@@ -118,11 +118,11 @@ class Sum : ReduceFunction<Event> {
     }
 }
 ```
-We instruct our flink job to read input data from Kafka, located at `localhost:9092`, from the topic named `input`. As output, we simply print stuff to the log.   
+We instruct our flink job to read input data from Kafka, located at `localhost:19092`, from the topic named `input`. As output, we simply print stuff to the log.   
 
 The `defineWorkflow` defines the execution graph. We read input from kafka line by line; `flatMap` applies a map operation, applying a function to every element. In our case, it simply splits every line into words. We then do a combination of keyBy, window and reduce functions; this is analogous to "group by" + aggregation statement in SQL.   
 
-`keyBy` groups all elements together; with sharded input and many processing nodes, different records can arrive at different shards from processing. `keyBy` makes sure that all records corresponding to a specific key are grouped on the same node for computation. Since input is "unbounded", we can never be sure that we have *all records*. So instead, we wait a certain time interval (here, 5 seconds), and then perform the computation.   
+`keyBy` groups all elements together; with sharded input and many processing nodes, different records can arrive at different shards for processing. `keyBy` makes sure that all records corresponding to a specific key are grouped on the same node for computation. Since input is "unbounded", we can never be sure that we have *all records*. So instead, we wait a certain time interval (here, 5 seconds), and then perform the computation.   
 
 Actual reduce operation uses our `Sum` custom class. It is a template class, taking `Event` as template argument - the same one we defined in our tokenizer. This class acts as a binary reduce operator: it takes two terms, a and b, and computes their sum - a + b. This way, after applying same operation to a set of records, we reduce them all down to a single term.   
 
@@ -157,6 +157,9 @@ flink run app/build/libs/app.jar
 Job has been submitted with JobID 73c72d6f6e99450fa6bd32c6ded9e7f5
 ```
 The job should appear in Flink UI.   
+
+![Sigmoid](./flink_ui2.png "Title")    
+
 
 The job itself will fail with the error similar to this:   
 ```
@@ -224,12 +227,12 @@ Caused by: java.util.concurrent.ExecutionException: org.apache.kafka.common.erro
 	... 9 more
 Caused by: org.apache.kafka.common.errors.TimeoutException: Timed out waiting for a node assignment. Call: describeTopics
 ```
-The only important part here is:   
+Most of this stuff is rubbish, which is typical for flink/java stacktraces. One of the necessary skills of Flink development is to be able to read through giant stack traces like this and find out important parts. In our case, the only important part is:   
 ```
 Caused by: org.apache.flink.util.FlinkRuntimeException: Failed to list subscribed topic partitions due to 
 	at org.apache.flink.connector.kafka.source.enumerator.KafkaSourceEnumerator.checkPartitionChanges(KafkaSourceEnumerator.java:234)
 ```
-This is Kafka error - which makes sense, we told the job to expect kafka to be on localhost:8082, but it's not! At least we know how to launch jobs now.
+This is Kafka error - which makes sense, we told the job to expect kafka to be on localhost:19082, but it's not! At least we know how to launch jobs now.
 ## Setting up kafka
 We will use [RedPanda](https://docs.redpanda.com/current/get-started/quick-start/) as our Kafka implementation. One of the ways to set that up is to use docker. Create the following `docker-compose.yml` file:  
 
@@ -303,7 +306,7 @@ services:
     depends_on:
       - redpanda-0
 ```
-Then run `docker compose up`. If all is well, the containers will start, and kafka topic will be available under `localhost:19092` address.   
+Then run `docker compose up`. If all is well, the containers will start, and kafka will be available under `localhost:19092` address.   
 
 To check that, install local version of `rpk`: [link](https://docs.redpanda.com/current/get-started/rpk-install/). Then run:  
 ```bash
@@ -326,3 +329,36 @@ NAME      PARTITIONS  REPLICAS
 _schemas  1           1
 input     1           1
 ```
+Run the job again to see how it works:  
+```bash
+flink run app/build/libs/app.jar
+```
+Wait a minute to make sure that no exceptions occur. In normal mode, the job will keep on running forever until it's cancelled. However, since noone writes to our local kafka topic, nothing is really happening. Let's publish some messages to fix that:  
+```bash
+rpk -X brokers=localhost:19092 topic produce input
+```
+This will prompt you to type something in. Better put in several lines at once, because our only output sink prints to logs, and they might not flush after just one line.   
+
+This is how your job's stats might look like:   
+
+![Sigmoid](./flink_ui3.png "Title")    
+
+Note non-zero records sent by the tokenizer, and non-zero records received by our print sink.
+
+To read the actual log with the output, go to Job Manager Log -> Log List -> one of "taskexecutor" logs. It should have around 100 bytes size:  
+```
+Event(word=hello, count=1)
+Event(word=there, count=1)
+Event(word=harry, count=1)
+Event(word=you, count=1)
+Event(word=i, count=1)
+Event(word=hello, count=1)
+Event(word=was, count=1)
+Event(word=expecting, count=1)
+Event(word=makmakmak, count=1)
+Event(word=hello, count=2)
+Event(word=hello, count=1)
+Event(word=hello, count=1)
+Event(word=flush, count=3)
+```
+This is it for today! Simple local flink setup works.
