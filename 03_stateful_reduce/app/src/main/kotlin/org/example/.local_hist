@@ -1,0 +1,9 @@
+1707406919: ls
+1707406921: git add App.kt
+1707406930: git commit -m "Code for 02. dynamodb sink"
+1707406931: git push
+1707408101: AWS_DEFAULT_REGION=region AWS_ACCESS_KEY_ID=id AWS_SECRET_ACCESS_KEY=key aws dynamodb get-item --endpoint-url http://localhost:8000 --table-name WordCounts --key '{"word": {"S": "hello"}}'
+1707414109: AWS_DEFAULT_REGION=region AWS_ACCESS_KEY_ID=id AWS_SECRET_ACCESS_KEY=key aws dynamodb get-item --endpoint-url http://localhost:8000 --table-name WordCounts --key '{"word": {"S": "hello"}}'
+1707460950: AWS_DEFAULT_REGION=region AWS_ACCESS_KEY_ID=id AWS_SECRET_ACCESS_KEY=key aws dynamodb get-item --endpoint-url http://localhost:8000 --table-name WordCounts --key '{"word": {"S": "hello"}}'
+1707461048: AWS_DEFAULT_REGION=region AWS_ACCESS_KEY_ID=id AWS_SECRET_ACCESS_KEY=key aws dynamodb get-item --endpoint-url http://localhost:8000 --table-name WordCounts --key '{"word": {"S": "hello"}}'
+1707461664: cd ..
