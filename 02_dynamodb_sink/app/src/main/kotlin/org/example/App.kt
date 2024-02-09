@@ -53,6 +53,7 @@ fun runJob() {
         .setTableName("WordCounts")
         .setElementConverter(CustomElementConverter())
         .setMaxBatchSize(20)
+        .setOverwriteByPartitionKeys(listOf("word"))
         .setDynamoDbProperties(sinkProperties)
         .build()
 
@@ -90,7 +91,9 @@ class Tokenizer : FlatMapFunction<String, Event> {
         line.lowercase()
             .split("\\W+".toRegex())
             .forEach { word ->
-                out.collect(Event(word, 1))
+                if (!word.isEmpty()) {
+                    out.collect(Event(word, 1))
+                }
             }
     }
 }
