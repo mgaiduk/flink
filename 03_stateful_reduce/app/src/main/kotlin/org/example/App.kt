@@ -49,6 +49,8 @@ fun runJob() {
         .build()
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment()
+    // checkpoint every minute
+    env.enableCheckpointing(60000);
 
     // configure dynamodb sink
     var sinkProperties = Properties();
