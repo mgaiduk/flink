@@ -125,18 +125,21 @@ class ProcessEvents :
     override fun process(
         word: String,
         context: Context,
-        statsList: Iterable<Event>,
+        events: Iterable<Event>,
         collector: Collector<Event>
     ) {
         val state: ValueState<Event> = context.globalState().getState(stateDescriptor)
 
-        var accumulatedStats = state.value() ?: Event(word, 0)
-        for (newStats in statsList) {
-            accumulatedStats.count += newStats.count
+        var accumulatedEvent = state.value() ?: Event(word, 0)
+        var i = 0
+        for (event in events) {
+            println("Processing event $i")
+            i += 1
+            accumulatedEvent.count += event.count
         }
 
-        state.update(accumulatedStats)
-        accumulatedStats.let { collector.collect(it) }
+        state.update(accumulatedEvent)
+        accumulatedEvent.let { collector.collect(it) }
     }
 }
 
