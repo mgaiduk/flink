@@ -11,7 +11,7 @@ import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.functions.sink.PrintSink
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows
-import org.apache.flink.streaming.api.windowing.time.Time
+import org.apache.flink.streaming.api.windowing.time.Time as WindowTime
 import org.apache.flink.util.Collector
 import java.util.Properties
 
@@ -29,6 +29,8 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.api.common.state.ValueState
 import org.apache.flink.api.common.state.ValueStateDescriptor
 import org.apache.flink.configuration.Configuration
+import org.apache.flink.api.common.state.StateTtlConfig;
+import org.apache.flink.api.common.time.Time;
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -129,7 +131,7 @@ fun defineWorkflow(
         .flatMap(Tokenizer())
         .name("tokenizer")
         .keyBy { value -> value.userId }
-        .window(TumblingEventTimeWindows.of(Time.seconds(5)))
+        .window(TumblingEventTimeWindows.of(WindowTime.seconds(5)))
         .reduce(Sum(), ProcessEvents())
         .name("counter")
 
@@ -159,7 +161,12 @@ class ProcessEvents :
     private lateinit var stateDescriptor: ValueStateDescriptor<AggregatedEvent>
 
     override fun open(parameters: Configuration) {
+        val ttlConfig = StateTtlConfig.newBuilder(Time.days(7))
+            .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+            .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+            .build()
         stateDescriptor = ValueStateDescriptor("AggregatedEvent", AggregatedEvent::class.java)
+        stateDescriptor.enableTimeToLive(ttlConfig)
         super.open(parameters)
     }
 
