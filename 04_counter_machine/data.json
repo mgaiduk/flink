@@ -1,0 +1,17 @@
+{"eventName":"like","userId":"1234","creatorId":"7777","eventTs":1707605599}
+{"eventName":"like","userId":"1235","creatorId":"7777","eventTs":1707605599}
+{"eventName":"view","userId":"1234","creatorId":"7777","eventTs":1707605599}
+{"eventName":"like","userId":"1235","creatorId":"7777","eventTs":1707605599}
+{"eventName":"like","userId":"1234","creatorId":"7776","eventTs":1707605601}
+{"eventName":"like","userId":"1235","creatorId":"7777","eventTs":1707605599}
+{"eventName":"like","userId":"1236","creatorId":"7777","eventTs":1707605599}
+{"eventName":"like","userId":"1234","creatorId":"7776","eventTs":1707605601}
+{"eventName":"like","userId":"1237","creatorId":"7776","eventTs":1707605601}
+{"eventName":"like","userId":"1235","creatorId":"7776","eventTs":1707605602}
+{"eventName":"view","userId":"1234","creatorId":"7777","eventTs":1707605599}
+{"eventName":"view","userId":"1235","creatorId":"7777","eventTs":1707605599}
+{"eventName":"view","userId":"1236","creatorId":"7777","eventTs":1707605599}
+{"eventName":"view","userId":"1234","creatorId":"7776","eventTs":1707605602}
+{"eventName":"view","userId":"1237","creatorId":"7776","eventTs":1707605601}
+{"eventName":"view","userId":"1235","creatorId":"7776","eventTs":1707605603}
+{"eventName":"view","userId":"1234","creatorId":"7776","eventTs":1707605607}
