@@ -32,24 +32,26 @@ import org.apache.flink.configuration.Configuration
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import DECAY_INTERVALS
 
 const val TOPIC = "input"
-const val DECAY_INTERVAL: Long = 5
+val DECAY_INTERVALS = longArrayOf(5, 10, 15)
 
 @Serializable
-data class RawEvent(
-    val eventName: String = "",
-    val userId: String = "",
-    val creatorId: String = "",
-    val eventTs: Long = 0,
-)
-
 data class Event(
     val eventName: String = "",
     val userId: String = "",
     val creatorId: String = "",
     val eventTs: Long = 0,
-    var eventCount: DecayCounter = DecayCounter(DECAY_INTERVAL, 0, 0.0),
+    var eventCount: Long = 0,
+)
+
+data class AggregatedEvent(
+    val eventName: String = "",
+    val userId: String = "",
+    val creatorId: String = "",
+    val eventTs: Long = 0,
+    var eventCounts: HashMap<Long, DecayCounter> = hashMapOf()
 )
 
 @Serializable
@@ -97,7 +99,7 @@ fun runJob() {
     sinkProperties.put(AWSConfigConstants.AWS_REGION, "ap-south-2");
     sinkProperties.put(AWSConfigConstants.AWS_ENDPOINT, "http://localhost:8000");
 
-    val dynamoDbSink = DynamoDbSink.builder<Event>()
+    val dynamoDbSink = DynamoDbSink.builder<AggregatedEvent>()
         .setTableName("UserCounters")
         .setElementConverter(CustomElementConverter())
         .setMaxBatchSize(20)
@@ -115,7 +117,7 @@ fun defineWorkflow(
     env: StreamExecutionEnvironment,
     source: Source<String, *, *>,
     sourceParallelism: Int,
-    sinkApplier: (stream: DataStream<Event>) -> Unit
+    sinkApplier: (stream: DataStream<AggregatedEvent>) -> Unit
 ) {
     val textLines = env.fromSource(
         source,
@@ -137,10 +139,9 @@ fun defineWorkflow(
 class Tokenizer : FlatMapFunction<String, Event> {
     override fun flatMap(line: String, out: Collector<Event>) {
         val json = Json { ignoreUnknownKeys = true } // Create a Json instance with configuration
-        val rawEvent = json.decodeFromString(RawEvent.serializer(), line)
-        val event = Event(eventName = rawEvent.eventName, userId = rawEvent.userId, creatorId = rawEvent.creatorId, 
-            eventCount = DecayCounter(decayInterval = DECAY_INTERVAL, lastUpdate = rawEvent.eventTs, value = 1.0))
-        println("Decoded event from json: ${rawEvent}")
+        val event = json.decodeFromString(Event.serializer(), line)
+        event.eventCount = 1
+        println("Decoded event from json: ${event}")
         out.collect(event)
     }
 }
@@ -153,12 +154,12 @@ class Sum : ReduceFunction<Event> {
 }
 
 class ProcessEvents :
-    ProcessWindowFunction<Event, Event, String, TimeWindow>() {
+    ProcessWindowFunction<Event, AggregatedEvent, String, TimeWindow>() {
     
-    private lateinit var stateDescriptor: ValueStateDescriptor<Event>
+    private lateinit var stateDescriptor: ValueStateDescriptor<AggregatedEvent>
 
     override fun open(parameters: Configuration) {
-        stateDescriptor = ValueStateDescriptor("Event", Event::class.java)
+        stateDescriptor = ValueStateDescriptor("AggregatedEvent", AggregatedEvent::class.java)
         super.open(parameters)
     }
 
@@ -166,13 +167,23 @@ class ProcessEvents :
         userId: String,
         context: Context,
         events: Iterable<Event>,
-        collector: Collector<Event>
+        collector: Collector<AggregatedEvent>
     ) {
-        val state: ValueState<Event> = context.globalState().getState(stateDescriptor)
+        val state: ValueState<AggregatedEvent> = context.globalState().getState(stateDescriptor)
 
-        var accumulatedEvent = state.value() ?: Event(userId = userId, eventCount = DecayCounter(DECAY_INTERVAL, 0, 0.0))
+        var accumulatedEvent = state.value() ?: AggregatedEvent(userId = userId)
+
         for (event in events) {
-            accumulatedEvent.eventCount += event.eventCount
+            for (decayInterval in DECAY_INTERVALS) {
+                var currentCount = accumulatedEvent.eventCounts.getOrPut(decayInterval) { 
+                    DecayCounter(decayInterval=decayInterval, lastUpdate=0, value=0.0)
+                }
+                val nextEvent = DecayCounter(decayInterval = decayInterval, lastUpdate = event.eventTs, value = event.eventCount.toDouble())
+                println("nextEvent: ${nextEvent}")
+                currentCount += nextEvent
+                println("currentCount: ${currentCount}")
+                accumulatedEvent.eventCounts.set(decayInterval, currentCount)
+            }
         }
 
         println("accumulatedEvent: ${accumulatedEvent}")
@@ -182,12 +193,24 @@ class ProcessEvents :
 }
 
 /** Example DynamoDB element converter. */
-class CustomElementConverter : ElementConverter<Event, DynamoDbWriteRequest> {
+class CustomElementConverter : ElementConverter<AggregatedEvent, DynamoDbWriteRequest> {
 
-    override fun apply(event: Event, context: SinkWriter.Context): DynamoDbWriteRequest {
+    override fun apply(event: AggregatedEvent, context: SinkWriter.Context): DynamoDbWriteRequest {
+        val countsMap: Map<String, AttributeValue> = event.eventCounts.mapKeys { entry ->
+            entry.key.toString()
+        }.mapValues { (_, decayCounter) ->
+            AttributeValue.builder().m(
+                mapOf(
+                    "decayInterval" to AttributeValue.builder().n(decayCounter.decayInterval.toString()).build(),
+                    "lastUpdate" to AttributeValue.builder().n(decayCounter.lastUpdate.toString()).build(),
+                    "value" to AttributeValue.builder().n(decayCounter.value.toString()).build()
+                )
+            ).build()
+        }
+
         val item = hashMapOf<String, AttributeValue>(
             "userId" to AttributeValue.builder().s(event.userId).build(),
-            "count" to AttributeValue.builder().n(event.eventCount.value.toString()).build()
+            "counts" to AttributeValue.builder().m(countsMap).build()
         )
 
         return DynamoDbWriteRequest.builder()
