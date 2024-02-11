@@ -38,6 +38,7 @@ import DECAY_INTERVALS
 
 const val TOPIC = "input"
 val DECAY_INTERVALS = longArrayOf(5, 10, 15)
+val ALLOWED_EVENTS = arrayOf("view", "like")
 
 @Serializable
 data class Event(
@@ -49,11 +50,14 @@ data class Event(
 )
 
 data class AggregatedEvent(
-    val eventName: String = "",
-    val userId: String = "",
-    val creatorId: String = "",
-    val eventTs: Long = 0,
+    val featureName: String = "",
+    val key: String = "",
     var eventCounts: HashMap<Long, DecayCounter> = hashMapOf()
+)
+
+data class KeyPair(
+    val eventName: String,
+    val key: String,
 )
 
 @Serializable
@@ -105,7 +109,7 @@ fun runJob() {
         .setTableName("UserCounters")
         .setElementConverter(CustomElementConverter())
         .setMaxBatchSize(20)
-        .setOverwriteByPartitionKeys(listOf("userId"))
+        .setOverwriteByPartitionKeys(listOf("key"))
         .setDynamoDbProperties(sinkProperties)
         .build()
 
@@ -130,7 +134,7 @@ fun defineWorkflow(
     val counts = textLines
         .flatMap(Tokenizer())
         .name("tokenizer")
-        .keyBy { value -> value.userId }
+        .keyBy { value -> KeyPair(eventName = value.eventName, key = value.userId) }
         .window(TumblingEventTimeWindows.of(WindowTime.seconds(5)))
         .reduce(Sum(), ProcessEvents())
         .name("counter")
@@ -142,6 +146,9 @@ class Tokenizer : FlatMapFunction<String, Event> {
     override fun flatMap(line: String, out: Collector<Event>) {
         val json = Json { ignoreUnknownKeys = true } // Create a Json instance with configuration
         val event = json.decodeFromString(Event.serializer(), line)
+        if (!(event.eventName in ALLOWED_EVENTS)) {
+            return
+        }
         event.eventCount = 1
         println("Decoded event from json: ${event}")
         out.collect(event)
@@ -156,7 +163,7 @@ class Sum : ReduceFunction<Event> {
 }
 
 class ProcessEvents :
-    ProcessWindowFunction<Event, AggregatedEvent, String, TimeWindow>() {
+    ProcessWindowFunction<Event, AggregatedEvent, KeyPair, TimeWindow>() {
     
     private lateinit var stateDescriptor: ValueStateDescriptor<AggregatedEvent>
 
@@ -171,14 +178,14 @@ class ProcessEvents :
     }
 
     override fun process(
-        userId: String,
+        keyPair: KeyPair,
         context: Context,
         events: Iterable<Event>,
         collector: Collector<AggregatedEvent>
     ) {
         val state: ValueState<AggregatedEvent> = context.globalState().getState(stateDescriptor)
 
-        var accumulatedEvent = state.value() ?: AggregatedEvent(userId = userId)
+        var accumulatedEvent = state.value() ?: AggregatedEvent(featureName = keyPair.eventName, key = keyPair.key)
 
         for (event in events) {
             for (decayInterval in DECAY_INTERVALS) {
@@ -216,7 +223,8 @@ class CustomElementConverter : ElementConverter<AggregatedEvent, DynamoDbWriteRe
         }
 
         val item = hashMapOf<String, AttributeValue>(
-            "userId" to AttributeValue.builder().s(event.userId).build(),
+            "key" to AttributeValue.builder().s(event.key).build(),
+            "featureName" to AttributeValue.builder().s(event.featureName).build(),
             "counts" to AttributeValue.builder().m(countsMap).build()
         )
 
