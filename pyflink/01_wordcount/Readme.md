@@ -16,7 +16,7 @@ Because development of flink programs involves passing around the executable bet
 
 If at any point flink versions and python versions used differ between local env and the cluster, you might get unexplained pickling errors or something even more cryptic.    
 
-Next, download Kafka connector from [this](page) and keep it handy. Unlike jvm-based programs that download dependencies automatically from Maven repository, with python programs, you will have to download the `.jar` yourself and pass it along with the code when running a job.  
+Next, download Kafka connector from [this page](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/table/downloads/) and keep it handy. Unlike jvm-based programs that download dependencies automatically from Maven repository, with python programs, you will have to download the `.jar` yourself and pass it along with the code when running a job.  
 
 ## Where to find information
 The official [flink docs](https://nightlies.apache.org/flink/flink-docs-master/docs/dev/python/datastream_tutorial/) have some information and code examples for pyflink with datastream api - we are using this api in this tutorial. Various parts of this doc tell about important aspects, for example, [submitting a job](https://nightlies.apache.org/flink/flink-docs-master/docs/deployment/cli/#submitting-pyflink-jobs).   
