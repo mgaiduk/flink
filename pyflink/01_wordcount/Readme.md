@@ -12,7 +12,8 @@ Because development of flink programs involves passing around the executable bet
 - Choose the same version (here, 1.8.1) when downloading local flink from [here](https://flink.apache.org/downloads/)
 - Choose the same flink version for side-party flink connectors, like kafka
 - Make sure you always launch pyflink jobs from the same `pyflink` virtual environment
-- When deploying in the cloud, make sure that the cloud has `flink` of the same version
+- When deploying in the cloud, make sure that the cloud has `flink` of the same version   
+
 If at any point flink versions and python versions used differ between local env and the cluster, you might get unexplained pickling errors or something even more cryptic.    
 
 Next, download Kafka connector from [this](page) and keep it handy. Unlike jvm-based programs that download dependencies automatically from Maven repository, with python programs, you will have to download the `.jar` yourself and pass it along with the code when running a job.  
@@ -97,7 +98,7 @@ To perform the actual wordcounting logic, we do the following:
 - We split a line into words - this is a map operation. This means that for every one message in the input kafka topic, we generate 0, 1 or many output messages
 - We add a bogus `1` counter to every word to make it easier to aggregate later
 - We group entries by `word`, sending all entries with the same word to the same worker
-- We perform `reduce` operation. It takes in a binary operator that tells it how to perform "sum" over two objects, yielding another object of the same class. Flink will apply this operation in some order to all input messages, outputting 1 output message per each input message, with the total word count for that word so far.   
+- We perform `reduce` operation. It takes in a binary operator that tells it how to perform "sum" over two objects, yielding another object of the same class. Flink will apply this operation in some order to all input messages, outputting 1 message per each input message, with the total word count for that word so far.   
 
 Note that without windows, `reduce` operation uses `global state`: it saves current total wordcount for every word encountered so far. The job can potentially run for months and years, and encounter millions of unique "words". Because of this, it is better to have checkointing mechanism to save this state in case of worker failures, and ttl mechanism to prevent it from growing indefinitely. Unfortunately, there is no way to specify `ttl` to this simple version of reduce function; we'll have to rewrite it to a `process` function with custom state handling. Because of this, it is better to introduce windowing into the pipeline, so that state is only kept for the duration of the window:   
 ```python
@@ -123,7 +124,7 @@ In order to use windowed reduce, we also need to add watermarking strategy. With
 We use `WatermarkStrategy.for_monotonous_timestamps` watermark strategy. It assumes that all timestamps in input events will be monotonously increasing, and discards any event that violates that assumption. In general case, you should carefully consider your timestamps guarantee, and choose proper watermark strategy as a trade-off between overall pipeline latency and percentage of events discarded. For example, we could use `.forBoundedOutOfOrderness(Duration.ofSeconds(5))` watermark strategy; it will allow events that are at most 5 seconds late to make it through the pipeline; this will also increase the latency of the pipeline by 5 seconds. In our case, we are going to use kafka timestamps for watermarking, and they are indeed guaranteed to be monotonous.   
 
 Using windowed reduce introduces two major changes to the pipeline:   
-- The state is now `local`, and keeps track of word counts within current window only. This means that the output of the pipeline is no longer `total word count since the beginning of times`, but simply `word count for this word in the past 5 secodns`.     
+- The state is now `local`, and keeps track of word counts within current window only. This means that the output of the pipeline is no longer `total word count since the beginning of times`, but simply `word count for this word in the past 5 seconds`.     
 - The number of output events is drastically reduced. The pipeline used to generate 1 output event for every word in the input event. Now, it will only output 1 event per unique word per 5 seconds.   
 
 Finally, we sink our data either to local file or to debug log on the cluster:   
