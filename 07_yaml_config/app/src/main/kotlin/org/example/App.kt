@@ -47,7 +47,7 @@ data class SourceConfig(
     val awsSecretAccessKey: String?,
     val streamInitialPosition: String = "TRIM_HORIZON",
     val datastreamName: String,
-    val kinesaliteTimestampFix: Bool = False,
+    val kinesaliteTimestampFix: Boolean = false,
 )
 
 data class SinkConfig(
@@ -167,7 +167,7 @@ fun runJob() {
     // env.enableCheckpointing(60000);
     val dynamoDbSink = initDynamodbSink(config.sink)
 
-    defineWorkflow(kinesisSource) { workflow -> 
+    defineWorkflow(kinesisSource, config) { workflow -> 
             workflow.sinkTo(dynamoDbSink) 
         }
     env.execute()
@@ -175,18 +175,19 @@ fun runJob() {
 
 fun defineWorkflow(
     source: DataStream<String>,
-    sinkApplier: (stream: DataStream<AggregatedEvent>) -> Unit,
-    config: AppConfig
+    config: AppConfig,
+    sinkApplier: (stream: DataStream<AggregatedEvent>) -> Unit
 ) {
-    val watermarkStrategy = WatermarkStrategy
+    var watermarkStrategy = WatermarkStrategy
         .forMonotonousTimestamps<Event>()
-        .withTimestampAssigner { event: Event, timestamp: Long -> 
-        if (config.source.kinesaliteTimestampFix) {
-            return timestamp * 1000 // convert to ms
-        } else {
-            return timestamp
+    if (config.source.kinesaliteTimestampFix) {
+        watermarkStrategy = watermarkStrategy.withTimestampAssigner { _event: Event, timestamp: Long -> timestamp * 1000
         }
+    } else {
+        watermarkStrategy = watermarkStrategy.withTimestampAssigner { _event: Event, timestamp: Long -> timestamp
         }
+    }
+        
     val counts = source
         .flatMap(Tokenizer())
         .assignTimestampsAndWatermarks(watermarkStrategy)
