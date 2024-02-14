@@ -147,7 +147,7 @@ From the same `bin` folder of flink, run the following command:
 ```
 This will start flink server, with UI being available on `localhost:8081`:   
 
-![Sigmoid](./flink_ui.png "Title")    
+![Sigmoid](./flink_ui.png?raw=true "Title")    
 ## Running flink job
 After building the tar and starting local flink cluster, you can run a job from the command line like this:
 ```bash
@@ -158,7 +158,7 @@ Job has been submitted with JobID 73c72d6f6e99450fa6bd32c6ded9e7f5
 ```
 The job should appear in Flink UI.   
 
-![Sigmoid](./flink_ui2.png "Title")    
+![Sigmoid](./flink_ui2.png?raw=true "Title")    
 
 
 The job itself will fail with the error similar to this:   
@@ -341,7 +341,7 @@ This will prompt you to type something in. Better put in several lines at once, 
 
 This is how your job's stats might look like:   
 
-![Sigmoid](./flink_ui3.png "Title")    
+![Sigmoid](./flink_ui3.png?raw=true "Title")    
 
 Note non-zero records sent by the tokenizer, and non-zero records received by our print sink.
 
