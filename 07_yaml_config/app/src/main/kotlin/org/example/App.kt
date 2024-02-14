@@ -40,9 +40,25 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import java.io.InputStream
 
+data class SourceConfig(
+    val awsEndpoint: String?,
+    val awsRegion: String?,
+    val awsAccessKeyId: String?,
+    val awsSecretAccessKey: String?,
+    val streamInitialPosition: String = "TRIM_HORIZON",
+    val datastreamName: String,
+    val kinesaliteTimestampFix: Bool = False,
+)
+
+data class SinkConfig(
+    val awsEndpoint: String?,
+    val awsRegion: String?,
+    val tableName: String,
+)
 
 data class AppConfig(
-    val sourceAwsEndpoint: String?
+    val source: SourceConfig,
+    val sink: SinkConfig,
 )
 
 fun loadConfig(): AppConfig {
@@ -52,7 +68,6 @@ fun loadConfig(): AppConfig {
     return yamlReader.readValue(inputStream, AppConfig::class.java)
 }
 
-const val TOPIC = "input"
 val DECAY_INTERVALS = longArrayOf(5, 10, 15)
 val ALLOWED_EVENTS = arrayOf("view", "like")
 
@@ -104,46 +119,55 @@ fun main() {
     runJob()
 }
 
+fun initKinesisSource(config: SourceConfig): FlinkKinesisConsumer<String> {
+    val properties = Properties()
+    if (config.awsEndpoint != null) {
+        properties[AWSConfigConstants.AWS_ENDPOINT] = config.awsEndpoint
+    }
+    if (config.awsRegion != null) {
+        properties[AWSConfigConstants.AWS_REGION] = config.awsRegion
+    }
+    if (config.awsAccessKeyId != null) {
+        properties[AWSConfigConstants.AWS_ACCESS_KEY_ID] = config.awsAccessKeyId
+    }
+    if (config.awsSecretAccessKey != null) {
+        properties[AWSConfigConstants.AWS_SECRET_ACCESS_KEY] = config.awsSecretAccessKey
+    }
+    properties[ConsumerConfigConstants.STREAM_INITIAL_POSITION] = config.streamInitialPosition
+    val kinesisConsumer = FlinkKinesisConsumer(config.datastreamName, SimpleStringSchema(), properties)
+    return kinesisConsumer
+}
+
+fun initDynamodbSink(config: SinkConfig): DynamoDbSink<AggregatedEvent> {
+    val properties = Properties()
+    if (config.awsEndpoint != null) {
+        properties[AWSConfigConstants.AWS_ENDPOINT] = config.awsEndpoint
+    }
+    if (config.awsRegion != null) {
+        properties[AWSConfigConstants.AWS_REGION] = config.awsRegion
+    }
+
+    val dynamoDbSink = DynamoDbSink.builder<AggregatedEvent>()
+        .setTableName(config.tableName)
+        .setElementConverter(CustomElementConverter())
+        .setMaxBatchSize(20)
+        .setOverwriteByPartitionKeys(listOf("key"))
+        .setDynamoDbProperties(properties)
+        .build()
+    return dynamoDbSink
+}
+
 fun runJob() {
     val config = loadConfig()
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment()
-    // source
-    
-    
-    val consumerConfig = Properties()
-    if (config.sourceAwsEndpoint != null) {
-        consumerConfig[AWSConfigConstants.AWS_ENDPOINT] = config.sourceAwsEndpoint
-    }
-    consumerConfig[AWSConfigConstants.AWS_REGION] = "us-east-1"
-    consumerConfig[AWSConfigConstants.AWS_ACCESS_KEY_ID] = "dummy"
-    consumerConfig[AWSConfigConstants.AWS_SECRET_ACCESS_KEY] = "dummy"
-    consumerConfig[ConsumerConfigConstants.STREAM_INITIAL_POSITION] = "TRIM_HORIZON"
-
-    
-
-    val kinesis: DataStream<String> = env.addSource(FlinkKinesisConsumer(
-        "flink-test", SimpleStringSchema(), consumerConfig))
-    
+    val kinesisConsumer = initKinesisSource(config.source)
+    val kinesisSource = env.addSource(kinesisConsumer)
     // checkpoint every minute
-    env.enableCheckpointing(60000);
+    // env.enableCheckpointing(60000);
+    val dynamoDbSink = initDynamodbSink(config.sink)
 
-    // configure dynamodb sink
-    var sinkProperties = Properties();
-    sinkProperties.put(AWSConfigConstants.AWS_REGION, "us-east-1");
-    sinkProperties.put(AWSConfigConstants.AWS_ENDPOINT, "http://localhost:8000");
-
-    val dynamoDbSink = DynamoDbSink.builder<AggregatedEvent>()
-        .setTableName("flink-test")
-        .setElementConverter(CustomElementConverter())
-        .setMaxBatchSize(20)
-        .setOverwriteByPartitionKeys(listOf("key"))
-        .setDynamoDbProperties(sinkProperties)
-        .build()
-
-
-
-    defineWorkflow(kinesis) { workflow -> 
+    defineWorkflow(kinesisSource) { workflow -> 
             workflow.sinkTo(dynamoDbSink) 
         }
     env.execute()
@@ -151,12 +175,17 @@ fun runJob() {
 
 fun defineWorkflow(
     source: DataStream<String>,
-    sinkApplier: (stream: DataStream<AggregatedEvent>) -> Unit
+    sinkApplier: (stream: DataStream<AggregatedEvent>) -> Unit,
+    config: AppConfig
 ) {
     val watermarkStrategy = WatermarkStrategy
         .forMonotonousTimestamps<Event>()
-        .withTimestampAssigner { event: Event, _: Long -> 
-            event.eventTs * 1000 // convert to ms
+        .withTimestampAssigner { event: Event, timestamp: Long -> 
+        if (config.source.kinesaliteTimestampFix) {
+            return timestamp * 1000 // convert to ms
+        } else {
+            return timestamp
+        }
         }
     val counts = source
         .flatMap(Tokenizer())
