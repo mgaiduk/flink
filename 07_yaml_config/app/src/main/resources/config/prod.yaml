@@ -1,0 +1,7 @@
+source:
+  awsRegion: "us-east-1"
+  streamInitialPosition: "TRIM_HORIZON"
+  datastreamName: "flink-test"
+sink:
+  awsRegion: "us-east-1"
+  tableName: "flink-test"
