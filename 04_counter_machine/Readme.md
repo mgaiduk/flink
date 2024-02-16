@@ -25,7 +25,7 @@ Now let's discuss how to build something like that in Flink.
 The "timestamp" filtering from above does not really work great for streaming processing. If we want to use events from the past month in our aggregation, we will have to store all these events, which becomes costly.   
 
 Alternative is to use "decaying counter". Let's say we had a counter value of 1.0 at a certain time point. 1 hour later, we get a counter increment of 2.0. But we want to "decay" the old value using exponential decay formula:  
-$$ value = value * e^{-\frac{timeDelta}{decayInterval}}$$
+$$value = value * e^{-\frac{timeDelta}{decayInterval}}$$
 `decayInterval` is the constant that controls how quick counter value decays over time. With interval of 1 hour, counter value will decay by approximately 2.7 over the course of an hour, and will decay to zero over a few hours. With interval of 1 month, the counter will hardly change in an hour, but will decay over the course of a few months. In this way, we can effectively capture the same "short term" and "long term" trends, but we only need to store 2 numbers: current counter value and last update time.   
 
 Here is the code for such a counter in Kotlin:   
