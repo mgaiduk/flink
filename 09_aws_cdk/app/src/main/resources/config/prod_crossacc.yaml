@@ -1,0 +1,8 @@
+source:
+  awsRegion: "us-east-1"
+  streamInitialPosition: "LATEST"
+  datastreamName: "flink-test"
+  awsAssumeRoleArn: "arn:aws:iam::891377060352:role/KA-Source-Stream-Role"
+sink:
+  awsRegion: "us-east-1"
+  tableName: "flink-test"
