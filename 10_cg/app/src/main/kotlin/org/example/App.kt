@@ -185,7 +185,7 @@ fun defineWorkflow(
         .setDynamoDbProperties(properties)
         .build()
 
-    val cgSink = DynamoDbSink.builder<CandidateList>()
+    val cgSink = DynamoDbSink.builder<TopManager>()
         .setTableName(config.sink.cgTableName)
         .setElementConverter(CGElementConverter())
         .setMaxBatchSize(20)

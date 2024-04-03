@@ -15,28 +15,30 @@ import org.apache.flink.api.connector.sink2.SinkWriter
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import org.apache.flink.connector.dynamodb.sink.DynamoDbWriteRequestType;
 
-
+import kotlinx.serialization.*
+import kotlinx.serialization.json.*
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import java.util.TreeMap
 
 val TOP_SIZE = 2
-val FEATURE_NAME = "view"
+val FEATURE_NAME = "like"
 val DECAY_INTERVAL: Long = 15
 
+@Serializable
 data class Candidate(
     val mediaId: String,
     var score: Double
-)
-
-data class CandidateList(
-    val candidates: List<Candidate>,
-)
+): java.io.Serializable
 
 /*
     Maintains TOP_SIZE candidates with the highest score
  */
-class TopManager {
+@Serializable
+class TopManager: java.io.Serializable {
     val scoresById = mutableMapOf<String, Double>()
     // we use tree map score -> set of ids, because different snaps can have the same score
+    @Transient
     val idsByScore = TreeMap<Double, MutableSet<String>>()
 
     fun consumeCandidate(candidate: Candidate): Boolean {
@@ -91,14 +93,25 @@ class TopManager {
         println("TopManager.getTop, current size: ${topCandidates.size}")
         return topCandidates
     }
+
+    private fun initializeIdsByScore() {
+        scoresById.forEach { (id, score) ->
+            idsByScore.getOrPut(score) { mutableSetOf() }.add(id)
+        }
+    }
+
+    init {
+        initializeIdsByScore()
+    }
 }
 
-class CGMapFn : RichFlatMapFunction<AggregatedEvent, CandidateList>() {
+
+class CGMapFn : RichFlatMapFunction<AggregatedEvent, TopManager>() {
     // non-persistent, in-memory state
     @Transient
     private var topManager = TopManager()
 
-    override fun flatMap(event: AggregatedEvent, out: Collector<CandidateList>) {
+    override fun flatMap(event: AggregatedEvent, out: Collector<TopManager>) {
         if (topManager == null) {
             topManager = TopManager()
         }
@@ -113,27 +126,25 @@ class CGMapFn : RichFlatMapFunction<AggregatedEvent, CandidateList>() {
         val isInserted = topManager.consumeCandidate(candidate)
         // output some data only if the snap actually made it into the top
         if (isInserted) {
-            out.collect(CandidateList(listOf(candidate)))
+            val result = TopManager()
+            result.consumeCandidate(candidate)
+            out.collect(result)
         }
     }
 }
 
 // combine-style intermediate aggregation
-class CGSumFn : ReduceFunction<CandidateList> {
-    override fun reduce(value1: CandidateList, value2: CandidateList): CandidateList {
-        val topManager = TopManager()
-        value1.candidates.forEach {candidate ->
-            topManager.consumeCandidate(candidate)
+class CGSumFn : ReduceFunction<TopManager> {
+    override fun reduce(value1: TopManager, value2: TopManager): TopManager {
+        value2.getTop().forEach {candidate ->
+            value1.consumeCandidate(candidate)
         }
-        value2.candidates.forEach {candidate ->
-            topManager.consumeCandidate(candidate)
-        }
-        return CandidateList(topManager.getTop())
+        return value1
     }
 }
 
 class CGProcessEventsFn :
-    ProcessAllWindowFunction<CandidateList, CandidateList, TimeWindow>() {
+    ProcessAllWindowFunction<TopManager, TopManager, TimeWindow>() {
     
     private lateinit var stateDescriptor: ListStateDescriptor<Candidate>
 
@@ -149,8 +160,8 @@ class CGProcessEventsFn :
 
     override fun process(
         context: Context,
-        candidateLists: Iterable<CandidateList>,
-        collector: Collector<CandidateList>
+        candidateLists: Iterable<TopManager>,
+        collector: Collector<TopManager>
     ) {
         val state: ListState<Candidate> = context.globalState().getListState(stateDescriptor)
 
@@ -159,22 +170,21 @@ class CGProcessEventsFn :
             topManager.consumeCandidate(candidate)
         }
         candidateLists.forEach {candidates ->
-            candidates.candidates.forEach {candidate ->
+            candidates.getTop().forEach {candidate ->
                 topManager.consumeCandidate(candidate)
             }
         }
-        val result = topManager.getTop()
-        state.update(result)
-        collector.collect(CandidateList(result))
+        state.update(topManager.getTop())
+        collector.collect(topManager)
     }
 }
 
 /** DynamoDB element converter. */
-class CGElementConverter : ElementConverter<CandidateList, DynamoDbWriteRequest> {
+class CGElementConverter : ElementConverter<TopManager, DynamoDbWriteRequest> {
 
-    override fun apply(candidates: CandidateList, context: SinkWriter.Context): DynamoDbWriteRequest {
+    override fun apply(candidates: TopManager, context: SinkWriter.Context): DynamoDbWriteRequest {
         // Convert each Candidate into a Map of AttributeValue, then into AttributeValue.M (a DynamoDB Map)
-        val candidatesAttributeValues: List<AttributeValue> = candidates.candidates.map { candidate ->
+        val candidatesAttributeValues: List<AttributeValue> = candidates.getTop().map { candidate ->
             val candidateMap = mapOf(
                 "mediaId" to AttributeValue.builder().s(candidate.mediaId).build(),
                 "score" to AttributeValue.builder().n(candidate.score.toString()).build()
