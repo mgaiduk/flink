@@ -136,10 +136,18 @@ class CGMapFn : RichFlatMapFunction<AggregatedEvent, TopManager>() {
 // combine-style intermediate aggregation
 class CGSumFn : ReduceFunction<TopManager> {
     override fun reduce(value1: TopManager, value2: TopManager): TopManager {
-        value2.getTop().forEach {candidate ->
-            value1.consumeCandidate(candidate)
+        // choose smaller value for combine
+        if (value1.scoresById.size > value2.scoresById.size) {
+            value2.getTop().forEach {candidate ->
+                value1.consumeCandidate(candidate)
+            }
+            return value1
+        } else {
+            value1.getTop().forEach {candidate ->
+                value2.consumeCandidate(candidate)
+            }
         }
-        return value1
+        return value2
     }
 }
 
