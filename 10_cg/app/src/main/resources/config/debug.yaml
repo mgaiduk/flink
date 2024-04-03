@@ -10,3 +10,4 @@ sink:
   awsRegion: "us-east-1"
   awsEndpoint: "http://localhost:8000"
   tableName: "flink-test"
+  cgTableName: "candidates"

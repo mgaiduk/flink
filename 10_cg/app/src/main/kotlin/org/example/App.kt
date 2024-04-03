@@ -9,6 +9,7 @@ import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time as WindowTime
+import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
 import org.apache.flink.util.Collector
 import java.util.Properties
 
@@ -55,6 +56,7 @@ data class SinkConfig(
     val awsEndpoint: String?,
     val awsRegion: String?,
     val tableName: String,
+    val cgTableName: String,
 )
 
 data class AppConfig(
@@ -77,6 +79,7 @@ data class Event(
     val eventName: String = "",
     val userId: String = "",
     val creatorId: String = "",
+    val mediaId: String = "",
     val eventTs: Long = 0,
     var eventCount: Long = 0,
 )
@@ -86,6 +89,10 @@ data class AggregatedEvent(
     val key: String = "",
     var eventCounts: HashMap<Long, DecayCounter> = hashMapOf()
 )
+
+
+
+
 
 data class KeyPair(
     val eventName: String,
@@ -144,25 +151,6 @@ fun initKinesisSource(config: SourceConfig): FlinkKinesisConsumer<String> {
     return kinesisConsumer
 }
 
-fun initDynamodbSink(config: SinkConfig): DynamoDbSink<AggregatedEvent> {
-    val properties = Properties()
-    if (config.awsEndpoint != null) {
-        properties[AWSConfigConstants.AWS_ENDPOINT] = config.awsEndpoint
-    }
-    if (config.awsRegion != null) {
-        properties[AWSConfigConstants.AWS_REGION] = config.awsRegion
-    }
-
-    val dynamoDbSink = DynamoDbSink.builder<AggregatedEvent>()
-        .setTableName(config.tableName)
-        .setElementConverter(CustomElementConverter())
-        .setMaxBatchSize(20)
-        .setOverwriteByPartitionKeys(listOf("key"))
-        .setDynamoDbProperties(properties)
-        .build()
-    return dynamoDbSink
-}
-
 fun runJob() {
     val config = loadConfig()
 
@@ -171,19 +159,42 @@ fun runJob() {
     val kinesisSource = env.addSource(kinesisConsumer)
     // checkpoint every minute
     // env.enableCheckpointing(60000);
-    val dynamoDbSink = initDynamodbSink(config.sink)
 
-    defineWorkflow(kinesisSource, config) { workflow -> 
-            workflow.sinkTo(dynamoDbSink) 
-        }
+    defineWorkflow(kinesisSource, config)
     env.execute()
 }
 
 fun defineWorkflow(
     source: DataStream<String>,
     config: AppConfig,
-    sinkApplier: (stream: DataStream<AggregatedEvent>) -> Unit
 ) {
+    // defining sinks
+    val properties = Properties()
+    if (config.sink.awsEndpoint != null) {
+        properties[AWSConfigConstants.AWS_ENDPOINT] = config.sink.awsEndpoint
+    }
+    if (config.sink.awsRegion != null) {
+        properties[AWSConfigConstants.AWS_REGION] = config.sink.awsRegion
+    }
+
+    val countersSink = DynamoDbSink.builder<AggregatedEvent>()
+        .setTableName(config.sink.tableName)
+        .setElementConverter(CustomElementConverter())
+        .setMaxBatchSize(20)
+        .setOverwriteByPartitionKeys(listOf("key"))
+        .setDynamoDbProperties(properties)
+        .build()
+
+    val cgSink = DynamoDbSink.builder<CandidateList>()
+        .setTableName(config.sink.cgTableName)
+        .setElementConverter(CGElementConverter())
+        .setMaxBatchSize(20)
+        .setOverwriteByPartitionKeys(listOf("CGName"))
+        .setDynamoDbProperties(properties)
+        .build()
+
+
+    // workflow logic
     var watermarkStrategy = WatermarkStrategy
         .forMonotonousTimestamps<Event>()
     if (config.source.kinesaliteTimestampFix) {
@@ -200,14 +211,23 @@ fun defineWorkflow(
         .name("tokenizer")
         .keyBy { 
             value -> 
-                println("Key by userId: ${value.userId}")
-                KeyPair(eventName = value.eventName, key = value.userId) 
+                println("Key by mediaId: ${value.mediaId}")
+                KeyPair(eventName = value.eventName, key = value.mediaId) 
             }
         .window(TumblingEventTimeWindows.of(WindowTime.seconds(5)))
         .reduce(Sum(), ProcessEvents())
         .name("counter")
 
-    sinkApplier(counts)
+    counts.sinkTo(countersSink)
+
+    // candidate generation
+    val cgResult = counts.flatMap(CGMapFn())
+        .name("cgMap")
+        .windowAll(TumblingProcessingTimeWindows.of(WindowTime.seconds(5)))
+        .reduce(CGSumFn(), CGProcessEventsFn())
+        .name("cgReduce")
+    
+    cgResult.sinkTo(cgSink)
 }
 
 class Tokenizer : FlatMapFunction<String, Event> {
@@ -222,6 +242,8 @@ class Tokenizer : FlatMapFunction<String, Event> {
         out.collect(event)
     }
 }
+
+
 
 class Sum : ReduceFunction<Event> {
     override fun reduce(value1: Event, value2: Event): Event {

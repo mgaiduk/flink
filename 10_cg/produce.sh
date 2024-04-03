@@ -22,10 +22,12 @@ do
 
     # Use AWS CLI to send the record to Kinesis
     aws kinesis put-record  --region "$REGION" \
+        --endpoint-url "$ENDPOINT_URL" \
         --stream-name "$STREAM_NAME" \
         --partition-key "$PARTITION_KEY" \
-        --profile "$PROFILE" \
         --data "$encodedData"
+        # --profile "$PROFILE" \
+        
 
     # Check if the AWS CLI command was successful
     if [ $? -ne 0 ]; then
