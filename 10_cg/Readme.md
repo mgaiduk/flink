@@ -1,316 +1,313 @@
-In the last couple of tutorials, we went through the process of setting up Flink as a Managed Flink Application (formerly, Managed Kinesis Analytics) in AWS. To do that, we had to go to the console and setup all necessary resources: kinesis datastream, dynamodb with necessary schema, Flink app itself, and permissions.   
+In the previous tutorial, we've built a "counter machine", that can be used to generate all sorts of counter-based features to be used in our recommender system.
+When using these features, at request time, the web service responsible for feed generation will have to fetch features for the user and a list of posts.
 
-Creating stuff through the UI has its own pros and cons; it is actually recommended in the very beginning, so that you see everything that happens and can react to problems as they arise. In this tutorial, we'll discuss another option, commonly referred to as "infrastructure as code". CDK, or "Cloud Development Kit", is Amazon way of doing infrastructure as code. Closest analogue to that outside of aws is [Terraform](https://www.terraform.io/).   
+What if the overall corpus size (posts available for recommendations) has millions of elements? We will have to request features for a million keys at a time. This is prohibitively slow and expensive.   
 
-Here are potential pros of the approach:
-- All resource creation is commited as code, on github. Team attrition will not result in loss of that knowledge
-- CDK deployments make sure to keep all resources up-to-date, deleting old resources that are no longer needed. People, on the other hand, tend to leave stuff running in the cloud, especially after one-off experiments.
-- It is easy to replicate cdk deployments, copying entire infrastructure stack when necessary. Examples: creating alternative, "staging" environment, or creating alternative infra stack in another zone   
+To avoid that, one typical solution is to use "candidate generators". They aim to provide an initial, filtered set of posts to be used in heavier models later on.   
 
-In this tutorial, we will set up Flink application with dependencies (kinesis datastream + dynamodb + permissions) using typescript cdk.
-## Getting started with cdk
-First, let's set up a cdk project. We will follow [this](https://docs.aws.amazon.com/cdk/v2/guide/getting_started.html) guide.    
+Few examples of candidate generators (cgs):
+- Knn-based cg, selecting posts with embedding closest to that of the user
+- Counter-based cgs, selecting top liked posts over the last week
+- Min views cg, selecting random posts with less then 100 views
+- Creator Affinity cg, selecting posts from creators the user followed or interacted with before.   
 
-Create a new folder, and install cdk:
-```bash
-mkdir cdk
-cd cdk
-npm install -g aws-cdk
-```
-Next, we init a sample app using `sample-app` template:   
-```bash
-cdk init sample-app --language typescript
-```
-`sample-app` is an app that uses SQS queues and SNS topics in AWS. This is not something we need for Flink, but it sets us up with the overall project structure, and we can rewrite the code from there. Here is the directory structure that we get after initializing the app:   
-```
-./.npmignore
-./test
-./test/cdk.test.ts
-./bin
-./bin/cdk.ts
-./jest.config.js
-./node_modules/*
-./cdk.json
-./.local_hist
-./README.md
-./.gitignore
-./package-lock.json
-./package.json
-./lib
-./lib/cdk-stack.ts
-./tsconfig.json
-```
-Most of these files are just various configs for npm/js/ts application (package*, node_modules, ts_config.json, jest for testing). `cdk.json` is the config file for the cdk, but we probably won't change anything there.   
 
-`bin/cdk.ts` is an entrypoint to the app:   
-```ts
-#!/usr/bin/env node
-import * as cdk from 'aws-cdk-lib';
-import { CdkStack } from '../lib/cdk-stack';
+In this tutorial, we will focus on "Counter Based" cgs, and show how to build them in Flink, reusing information already generated in the counter machine.    
 
-const app = new cdk.App();
-new CdkStack(app, 'CdkStack');
-```
-It creates a *cdk app*, and a new *stack* called CdkStack attached to it.   
+Using flink for candidate generation is a good way to make sure candidates in the CG are updated real-time, which is as important as updating the features. Alternatives, like a batch process that selects top candidates once a day, will always have "staleness" problem:
+- New posts will take a lot of time to make it into the primary cg
+- Posts that just became trending will not be picked up by the cg for some time
+- Posts that "died" and stopped being trending will keep showing as candidates for some time   
 
-Here is the definition of the CdkStack, in `lib/cdk-stack.ts`:   
-```ts
-import { Duration, Stack, StackProps } from 'aws-cdk-lib';
-import * as sns from 'aws-cdk-lib/aws-sns';
-import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
-import * as sqs from 'aws-cdk-lib/aws-sqs';
-import { Construct } from 'constructs';
+## The logic
+Let's start with a simple logic for candidate generation: `select top 500 posts with the most likes over the last day`. Similar techniques can be used to code down many logic examples, like "top fresh posts by likes in the last 15 minutes" as well as "top posts by overall likes", though some advanced logic like "top posts by like to view ratio amongst posts with more than 100 views" are a bit harder and will require streaming joins.  
 
-export class CdkStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
-    super(scope, id, props);
+In our counter machine code, we already calculate counters like "total number of likes over the last day". So we just need to select a specified counter for each post, then aggregate all the posts into global top-500.   
 
-    const queue = new sqs.Queue(this, 'CdkQueue', {
-      visibilityTimeout: Duration.seconds(300)
-    });
+First, let's write logic for score aggregation. This is pure kotlin, so we can write it and test locally:  
+```kotlin
+val TOP_SIZE = 500
 
-    const topic = new sns.Topic(this, 'CdkTopic');
+@Serializable
+data class Candidate(
+    val mediaId: String,
+    var score: Double
+): java.io.Serializable
 
-    topic.addSubscription(new subs.SqsSubscription(queue));
-  }
+/*
+    Maintains TOP_SIZE candidates with the highest score
+ */
+@Serializable
+class TopManager: java.io.Serializable {
+    val scoresById = mutableMapOf<String, Double>()
+    // we use tree map score -> set of ids, because different snaps can have the same score
+    @Transient
+    val idsByScore = TreeMap<Double, MutableSet<String>>()
+
+    fun consumeCandidate(candidate: Candidate): Boolean {
+        val oldScore = scoresById[candidate.mediaId]
+        val newScore = candidate.score
+        val id = candidate.mediaId
+        
+        // If the ID is already in the map, remove it (might insert back later)
+        if (oldScore != null) {
+            val ids = idsByScore[oldScore]
+            ids?.remove(id)
+            if (ids.isNullOrEmpty()) {
+                idsByScore.remove(oldScore)
+            }
+            scoresById.remove(id)
+        }
+
+        scoresById[id] = newScore
+        // attempt to add the new score
+        idsByScore.getOrPut(newScore) { mutableSetOf() }.add(id)
+
+        // Ensure we only keep the top TOP_SIZE
+        // potentially removes just added score
+        while (scoresById.size > TOP_SIZE) {
+            val firstEntry = idsByScore.firstEntry()
+            val idsToRemove = firstEntry.value
+            if (!idsToRemove.isNullOrEmpty()) {
+                val idToRemove = idsToRemove.first()
+                idsToRemove.remove(idToRemove)
+                scoresById.remove(idToRemove)
+                if (idsToRemove.isEmpty()) {
+                    idsByScore.pollFirstEntry()
+                }
+            }
+        }
+
+        // indicates whether new candidate was inserted or not
+        if (scoresById[candidate.mediaId] != null && (oldScore == null || newScore > oldScore)) {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    fun getTop(): List<Candidate> {
+        val topCandidates = mutableListOf<Candidate>()
+        idsByScore.descendingMap().forEach { (score, ids) ->
+            ids.forEach { id ->
+                topCandidates.add(Candidate(id, score))
+            }
+        }
+        println("TopManager.getTop, current size: ${topCandidates.size}")
+        return topCandidates
+    }
+
+    private fun initializeIdsByScore() {
+        scoresById.forEach { (id, score) ->
+            idsByScore.getOrPut(score) { mutableSetOf() }.add(id)
+        }
+    }
+
+    init {
+        initializeIdsByScore()
+    }
 }
 ```
-As promised, it only has sqs queue and sns topic.   
+The `TopManager` class is responsible for keeping track of current top 500 posts by score, whatever the definition for the score is. It uses TreeMap to keep track of current top-500 post ids; we need to use the score as key for TreeMap's sorting; multiple posts can have exactly the same score, so we need to have a set of ids as value.   
+## ProcessAllWindowFunction
+When aggregating counters in the counter machine, we used "reduce" operation on a so-called "Keyed" stream - stream grouped by a certain key, like postId or userId. Now, we don't really have a "key" to speak of, we need some sort of "global" reduce. There are 2 ways to achieve this: either use a bogus "key" with constant value, like `""`, or use a so-called `windowAll` operation. We'll go for the latter. First, we define a ProcessWindowAll function: it takes in all events that happened within a specified time window (5 secs) globally, and produces single output.  
+```kotlin
+class CGProcessEventsFn :
+    ProcessAllWindowFunction<TopManager, TopManager, TimeWindow>() {
+    
+    private lateinit var stateDescriptor: ListStateDescriptor<Candidate>
 
-Ckd *stack* is a unit of deployment. Technically, you can put all of your resources in one stack; alternatively, you can separate them in different stacks, which allows independant deployment and rollback of these stacks.   
+    override fun open(parameters: Configuration) {
+        val ttlConfig = StateTtlConfig.newBuilder(Time.days(7))
+            .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+            .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+            .build()
+        stateDescriptor = ListStateDescriptor("CGProcessEventsFn", Candidate::class.java)
+        stateDescriptor.enableTimeToLive(ttlConfig)
+        super.open(parameters)
+    }
 
-Before philosophising further, let's get this thing deployed so we can take a look at it at AWS console UI. After creating cdk app for the first time, we need to "bootstrap" it:   
-```bash
-cdk bootstrap --profile my-sso-profile aws://12345678/us-east-1
-```
-```
- ⏳  Bootstrapping environment aws://767397884728/us-east-1...
-Trusted accounts for deployment: (none)
-Trusted accounts for lookup: (none)
-Using default execution policy of 'arn:aws:iam::aws:policy/AdministratorAccess'. Pass '--cloudformation-execution-policies' to customize.
+    override fun process(
+        context: Context,
+        candidateLists: Iterable<TopManager>,
+        collector: Collector<TopManager>
+    ) {
+        val state: ListState<Candidate> = context.globalState().getListState(stateDescriptor)
 
- ✨ hotswap deployment skipped - no changes were detected (use --force to override)
-
- ✅  Environment aws://767397884728/us-east-1 bootstrapped (no changes).
- ```
-As always, change account number and region as needed.   
-
-`cdk bootstrap`, as well as later commands, requires aws authentication. You can either provide access key and secret token by typical means (config, env variable etc), or use sso profile like this: `--profile my_profile_name`. Use `aws configure sso` first to make that work.   
-
-"Bootstrap" creates cloud resources needed for cdk to function. We can see the newly bootstrapped cdk in the CloudFormation aws console service. CloudFormation is another tool for "infrastructure as code" in aws. It uses yaml or json configs to declare which resources need to be created. Cdk is a tool that operates on top of CloudFormation; it uses an imperative language (like typescript) to define the resources needed, and cdk itself will convert that into CloudFormation config during deployment. You can run `cdk synth` to view the actual config before deploying it.    
-
-![Sigmoid](./cdk.png "Title")    
-
-Now let's deploy our sample app:   
-```bash
-cdk deploy --profile my-sso-profile
-```
-
-```
-  Synthesis time: 6.6s
-
-This deployment will make potentially sensitive changes according to your current security approval level (--require-approval broadening).
-Please confirm you intend to make the following modifications:
-
-IAM Statement Changes
-┌───┬─────────────────┬────────┬─────────────────┬───────────────────────────┬─────────────────────────────────────────────────┐
-│   │ Resource        │ Effect │ Action          │ Principal                 │ Condition                                       │
-├───┼─────────────────┼────────┼─────────────────┼───────────────────────────┼─────────────────────────────────────────────────┤
-│ + │ ${CdkQueue.Arn} │ Allow  │ sqs:SendMessage │ Service:sns.amazonaws.com │ "ArnEquals": {                                  │
-│   │                 │        │                 │                           │   "aws:SourceArn": "${CdkTopic}"                │
-│   │                 │        │                 │                           │ }                                               │
-└───┴─────────────────┴────────┴─────────────────┴───────────────────────────┴─────────────────────────────────────────────────┘
-(NOTE: There may be security-related changes not in this list. See https://github.com/aws/aws-cdk/issues/1299)
-
-Do you wish to deploy these changes (y/n)?
-```
-In my case, it asks for a confirmation when chaning IAM policies.   
-
-Now, in the CloudFormation service in aws console, we can see our newly created stack called `CdkStack`. On the `Resources` tab of the stack, you can see the actual resources that got created, SNS topic for example.
-## Creating kinesis datastream with cdk
-But we didn't do it for sns topics or sqs queues. We need kinesis datastream, dynamodb and flink. Change the code in the `cdk-stack.ts` to:   
-```ts
-import { Duration, Stack, StackProps,
-  aws_kinesis as kinesis,
-} from 'aws-cdk-lib';
-import * as sns from 'aws-cdk-lib/aws-sns';
-import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
-import * as sqs from 'aws-cdk-lib/aws-sqs';
-import { Construct } from 'constructs';
-
-export class CdkStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
-    super(scope, id, props);
-
-    const signalStream = new kinesis.Stream(this, 'SignalStream', {
-      streamMode: kinesis.StreamMode.ON_DEMAND,
-      streamName: `flink-test`,
-    });
-  }
-}
-
-```
-We add an import of `aws_kinesis` from `aws-cdk-lib`; then we create a new kinesis stream. The documentation of the function call can be found [here](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_kinesis.Stream.html).   
-
-After running the deployment again, this is what we can see in the console:   
-```
-CdkStack:  start: Building 01afa4b3cdba34b7d3d86bd21642f26c03d580b849b2e44be1cda674eec69c30:current_account-current_region
-CdkStack:  success: Built 01afa4b3cdba34b7d3d86bd21642f26c03d580b849b2e44be1cda674eec69c30:current_account-current_region
-CdkStack:  start: Publishing 01afa4b3cdba34b7d3d86bd21642f26c03d580b849b2e44be1cda674eec69c30:current_account-current_region
-CdkStack:  success: Published 01afa4b3cdba34b7d3d86bd21642f26c03d580b849b2e44be1cda674eec69c30:current_account-current_region
-CdkStack: deploying... [1/1]
-CdkStack: creating CloudFormation changeset...
-[████████████████████████████████████▎·····················] (5/8)
-
-13:48:02 | UPDATE_COMPLETE_CLEA | AWS::CloudFormation::Stack | CdkStack
-13:48:06 | DELETE_IN_PROGRESS   | AWS::SNS::Topic      | CdkTopic7E7E1214
-13:48:06 | DELETE_IN_PROGRESS   | AWS::SQS::Queue      | CdkQueueBA7F247D
-```
-This demonstrates an important cdk/cloudformation concept - *changesets*. A cdk *stack* is like an umbrella that groups together a bunch of aws resources under a common name. After changing the code and triggering the deployment, cdk generates a new CloudFormation template that only has a kinesis datastream defined in it. Old template had SNS topic and SQS queue. After the deployment, SNS topic and SQS queue will be deleted, and kinesis datastream will be created. If you run the deployment again, it will not create a second datastream; CloudFormation sees that you need one datastream, and that one datastream already exists, so no resource changes will be made.   
-
-Now in the Resources tab of the cloudformation stack, you can see the resource for Kinesis Datastream. You can click on the link, get to the Kinesis Datastream page on Kinesis aws service, and see for yourself that a datastream created from cdk is exactly the same as a datastream created in AWS Console UI.
-## Adding more resources for Flink
-Now, lets add a dynamodb:  
-```ts
-import { ...,
-  aws_dynamodb as dynamodb,
-  RemovalPolicy,
-} from 'aws-cdk-lib';
-
-...
-
-export class CdkStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
-    ...
-
-    const dynamodbSink = new dynamodb.Table(this, 'community-feed-table', {
-      tableName: `flink-test`,
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-
-      partitionKey: {
-        name: 'key',
-        type: dynamodb.AttributeType.STRING,
-      },
-      sortKey: {
-        name: 'featureName',
-        type: dynamodb.AttributeType.STRING,
-      },
-
-      removalPolicy: RemovalPolicy.DESTROY,
-
-      timeToLiveAttribute: 'ttl',
-
-      pointInTimeRecovery: false,
-    });
-  }
-}
-
-```
-Just as with aws cli/console creation, we have to specify primary and secondary keys, table name, ttl attribute and so on.   
-
-It is a good idea to trigger the deployment each time you make a change, to catch potential problems early on.   
-
-Next, let's add roles with necessary permissions:   
-```ts
-import {...,
-  aws_iam as iam,
-} from 'aws-cdk-lib';
-
-export class CdkStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
-
-    ...
-
-    const flinkRole = new iam.Role(this, 'ApplicationRole', {
-      assumedBy: new iam.ServicePrincipal('kinesisanalytics.amazonaws.com'),
-      roleName: `flink-cdk-test-role`,
-    });
-
-    dynamodbSink.grantWriteData(flinkRole);
-    signalStream.grantRead(flinkRole)
-  }
+        val topManager = TopManager()
+        state.get().forEach {candidate ->
+            topManager.consumeCandidate(candidate)
+        }
+        candidateLists.forEach {candidates ->
+            candidates.getTop().forEach {candidate ->
+                topManager.consumeCandidate(candidate)
+            }
+        }
+        state.update(topManager.getTop())
+        collector.collect(topManager)
+    }
 }
 ```
-If you recall, for AWS Console UI permissions, we had to go through a laborious process of remembering different resource arns, modifying the config in different places and so on. Now, we just tell datastream and dynamodb to grant a permission to flink role. Elegant!   
+Note the slight difference to `ProcessWindowFunction` we had before: it is now `ProcessAllWindowFunction`, and it doesn't have a template argument for key type, because there is no key to speak of. Remainder of the logic is more or less the same: we keep persistent state to prevent us from losing all candidate data in case of worker outages, we iterate over all inputs for the specified time window, and produce a single output - which is itself a list of up to 500 posts.  
+## Reduce Operator for some optimizations
+The function above has one vulnerability: it will always be executed on one node, because there is no partitioning logic that can be applied. If we have trillions of operations per second coming in, the node will simply not be able to handle all the load. In addition, with 5-second window aggregation, Flink will have to keep all the events for current window in memory before even starting to process it, so it will hold around 5 trillion events in memory on average.  
 
-Next, let's create the actual flink app. First, install flink library using npm: 
-```bash
-npm install @aws-cdk/aws-kinesisanalytics-flink-alpha
-```
-And add the code to initialize Flink app: 
-```ts
-import { ...
-  aws_logs as logs,
-} from 'aws-cdk-lib';
-import * as flink from '@aws-cdk/aws-kinesisanalytics-flink-alpha';
-import path from 'path';
+Our counter machine reducer mitigates that partly: it reduces all events by postId, generating only 1 record per postId per 5 seconds. However, if there are lots of unique posts, that will not help completely.   
 
-export class CdkStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
-    ...
+Another optimization we can make is to provide a binary "reduce" operator for intermediate aggregation: 
+```kotlin
 
-    const projectRoot = __dirname.split('/lib')[0];
-
-    const code = flink.ApplicationCode.fromAsset(
-      path.join(projectRoot, '../app/build/libs/app.jar'),
-    );
-
-    new flink.Application(this, 'Application', {
-      code,
-      runtime: flink.Runtime.FLINK_1_15,
-      applicationName: `flink-cdk-test-flink`,
-      autoScalingEnabled: true,
-      checkpointingEnabled: true,
-      checkpointInterval: Duration.millis(60_000),
-      minPauseBetweenCheckpoints: Duration.millis(5_000),
-      logGroup: new logs.LogGroup(this, 'LogGroup'),
-      logLevel: flink.LogLevel.INFO,
-      metricsLevel: flink.MetricsLevel.APPLICATION,
-      parallelism: 1,
-      parallelismPerKpu: 1,
-      propertyGroups: {},
-      removalPolicy: RemovalPolicy.RETAIN,
-      role: flinkRole,
-      snapshotsEnabled: true,
-    });
-  }
+// combine-style intermediate aggregation
+class CGSumFn : ReduceFunction<TopManager> {
+    override fun reduce(value1: TopManager, value2: TopManager): TopManager {
+        // choose smaller value for combine
+        if (value1.scoresById.size > value2.scoresById.size) {
+            value2.getTop().forEach {candidate ->
+                value1.consumeCandidate(candidate)
+            }
+            return value1
+        } else {
+            value1.getTop().forEach {candidate ->
+                value2.consumeCandidate(candidate)
+            }
+        }
+        return value2
+    }
 }
 ```
-Before, we had to manually build a jar file, upload it to s3, and then point our Flink app to it. With cdk, we can just point the config to our local `.jar` file, the rest will be handled for us. We do need to build the jar ourselves though; with development teams, that part is usually automated using ci/cd.   
+Its job is to do intermediate aggregation while the window is still not closed; new events coming in will be passed through this reduce function. So instead of keeping 5 trillion of events in memory, it will be reduced down to a single record with up to 500 posts.   
 
-Because of the `path` module, you might stumble on the following error:
-```
-  node_modules/@types/node/path.d.ts:178:5
-    178     export = path;
-            ~~~~~~~~~~~~~~
-    This module is declared with 'export =', and can only be used with a default import when using the 'esModuleInterop' flag.
-```
-To fix, insert the following into `tsconfig.json`:
-```json
-"esModuleInterop": true,
-```
-Deploying this will create Managed Apache Flink application, dynamodb table, kinesis datastream, and all required roles and permissions.   
+We also want to keep complexity of this code minimal; flink gives no guarantees about the order in which this reduce operator will be applied. It can either take current aggregated state (big state, 500 posts), and add a new incoming events to it; or take a huge list of events and combine them in a divide-and-conquer style. To be ready for all cases, we always check which value has the smaller number of posts and optimize accordingly.
+## Map function and some more optimizations
+So far, all our reduce and process functions operate on incoming `TopManager` events. But we need to get those first; it can be done in a map operation. The same operation will have the logic of selecting which exact counter and feature name to use as a score.
+```kotlin
+class CGMapFn : RichFlatMapFunction<AggregatedEvent, TopManager>() {
+    // non-persistent, in-memory state
+    @Transient
+    private var topManager = TopManager()
 
-We only have a couple of problems now, though not critical:
-- The application being deployed does not run automatically. We still have to start it manually in AWS Console, though just the first time. This can be automated using Lambdas.
-- We have some configurations, like datastream name and dynamodb table name, that are duplicated in cdk and in Flink yaml config. If we had many environments (prod/staging, for example), it might get messy. We can unite these by using FlinkApplicationProperties in cdk ([reference](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-kinesisanalytics-flink-alpha-readme.html)). They allow passing arbitrary configuration externally via cdk, and then reading that in Flink code.
-## Potential problems
-Sometimes, you might see a cdk deployment error like this:
+    override fun flatMap(event: AggregatedEvent, out: Collector<TopManager>) {
+        if (topManager == null) {
+            topManager = TopManager()
+        }
+        if (event.featureName != FEATURE_NAME) {
+            return
+        }
+        val score: Double? = event.eventCounts[DECAY_INTERVAL]?.value
+        if (score == null) {
+            return
+        }
+        val candidate = Candidate(event.key, score)
+        val isInserted = topManager.consumeCandidate(candidate)
+        // output some data only if the snap actually made it into the top
+        if (isInserted) {
+            val result = TopManager()
+            result.consumeCandidate(candidate)
+            out.collect(result)
+        }
+    }
+}
 ```
-Failed to take snapshot for the application
-```
-Or this:
-```
-UPDATE_ROLLBACK_FAILED
-```
-That might happen due to some exceptions in Flink. Normally, Flink reads data from the input stream, processes it, writes to the sink, and snapshots its state once every minute. If it encounters an exception - permissions misconfiguration, for example, or one unexpected record that has wrong format - Flink stops making progress, and hence, snapshots. This is the default behaviour; there is a trade-off between uptime and correctness in such case. As an alternative, Flink could've just skip bad records; no processing downtime will occur, but if suddenly 100% of records become "bad", all the data will be lost, and noone even will be alerted.   
+This map operation triggers on every incoming AggregatedEvent (1 event per unique postId per 5 seconds for this partition). As a load-limiting measure, we also perform on-the-fly top aggregation. We keep our own TopManager in each mapper; it is marked as Transient to signify that we don't actually care about it's state persistence.   
 
-On the other hand, cdk assumes that Flink has important information in its state, and waits for it to make a snapshot before any changes, like fresh deployment or even rollback, can be made. Unfortunately, cdk is not smart enough to track that Flink is not actually making any progress, and it just should use last successful snapshot.   
+It keeps its own top-500 posts, and only sends output events when a new post makes it into the top, or when the score is updated upwards for the post that is already in the top. This should in theory filter out majority of events that should not affect the final top.
+## Final workflow
+```kotlin
+fun defineWorkflow(
+    source: DataStream<String>,
+    config: AppConfig,
+) {
+    // defining sinks
+    val properties = Properties()
+    if (config.sink.awsEndpoint != null) {
+        properties[AWSConfigConstants.AWS_ENDPOINT] = config.sink.awsEndpoint
+    }
+    if (config.sink.awsRegion != null) {
+        properties[AWSConfigConstants.AWS_REGION] = config.sink.awsRegion
+    }
 
-In such a case, cdk deployment will get stuck. It will try to deploy new version; it won't work; cdk will try to revert the deployment to the last correct version, but the rollback will also not work because of the snapshotting problem. The system will get stuck and will require some manual intervention:
-- Open Flink app in UI and force-stop it. 
-- Run the following command to perform the rollback and clear the error:   
-```bash
-aws cloudformation --profile my-sso-profile continue-update-rollback --stack-name CdkStack
+    val countersSink = DynamoDbSink.builder<AggregatedEvent>()
+        .setTableName(config.sink.tableName)
+        .setElementConverter(CustomElementConverter())
+        .setMaxBatchSize(20)
+        .setOverwriteByPartitionKeys(listOf("key"))
+        .setDynamoDbProperties(properties)
+        .build()
+
+    val cgSink = DynamoDbSink.builder<TopManager>()
+        .setTableName(config.sink.cgTableName)
+        .setElementConverter(CGElementConverter())
+        .setMaxBatchSize(20)
+        .setOverwriteByPartitionKeys(listOf("CGName"))
+        .setDynamoDbProperties(properties)
+        .build()
+
+
+    // workflow logic
+    var watermarkStrategy = WatermarkStrategy
+        .forMonotonousTimestamps<Event>()
+    if (config.source.kinesaliteTimestampFix) {
+        watermarkStrategy = watermarkStrategy.withTimestampAssigner { _event: Event, timestamp: Long -> timestamp * 1000
+        }
+    } else {
+        watermarkStrategy = watermarkStrategy.withTimestampAssigner { _event: Event, timestamp: Long -> timestamp
+        }
+    }
+        
+    val counts = source
+        .flatMap(Tokenizer())
+        .assignTimestampsAndWatermarks(watermarkStrategy)
+        .name("tokenizer")
+        .keyBy { 
+            value -> 
+                println("Key by mediaId: ${value.mediaId}")
+                KeyPair(eventName = value.eventName, key = value.mediaId) 
+            }
+        .window(TumblingEventTimeWindows.of(WindowTime.seconds(5)))
+        .reduce(Sum(), ProcessEvents())
+        .name("counter")
+
+    counts.sinkTo(countersSink)
+
+    // candidate generation
+    val cgResult = counts.flatMap(CGMapFn())
+        .name("cgMap")
+        .windowAll(TumblingProcessingTimeWindows.of(WindowTime.seconds(5)))
+        .reduce(CGSumFn(), CGProcessEventsFn())
+        .name("cgReduce")
+    
+    cgResult.sinkTo(cgSink)
+}
 ```
-After this, cdk will get "unstuck" and further deployments will be possible.
+We take `counts` stream from previous tutorial, and apply `flatMap` -> `windowAll` -> `reduce` operations on top of it. We also define second sink, to write our candidate data.   
+
+Since the format is different, we also need a separate dynampdb write request function: 
+```kotlin
+class CGElementConverter : ElementConverter<TopManager, DynamoDbWriteRequest> {
+
+    override fun apply(candidates: TopManager, context: SinkWriter.Context): DynamoDbWriteRequest {
+        // Convert each Candidate into a Map of AttributeValue, then into AttributeValue.M (a DynamoDB Map)
+        val candidatesAttributeValues: List<AttributeValue> = candidates.getTop().map { candidate ->
+            val candidateMap = mapOf(
+                "mediaId" to AttributeValue.builder().s(candidate.mediaId).build(),
+                "score" to AttributeValue.builder().n(candidate.score.toString()).build()
+            )
+            // Convert the map into an AttributeValue object representing a DynamoDB Map
+            AttributeValue.builder().m(candidateMap).build()
+        }
+
+        // Now, instead of wrapping the candidates in a map, create an AttributeValue list (L)
+        val item = hashMapOf<String, AttributeValue>(
+            "CGName" to AttributeValue.builder().s("TopViews").build(),
+            "Candidates" to AttributeValue.builder().l(candidatesAttributeValues).build() // This creates a list type
+        )
+
+        println("Writing ${item} to dynamodb")
+        // Create and return the DynamoDbWriteRequest with the modified structure
+        return DynamoDbWriteRequest.builder()
+            .setType(DynamoDbWriteRequestType.PUT)
+            .setItem(item)
+            .build()
+    }
+}
+```
