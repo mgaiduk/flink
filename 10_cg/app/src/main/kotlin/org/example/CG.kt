@@ -18,7 +18,7 @@ import org.apache.flink.connector.dynamodb.sink.DynamoDbWriteRequestType;
 
 import java.util.TreeMap
 
-val TOP_SIZE = 500
+val TOP_SIZE = 2
 val FEATURE_NAME = "view"
 val DECAY_INTERVAL: Long = 15
 
@@ -60,7 +60,7 @@ class TopManager {
 
         // Ensure we only keep the top TOP_SIZE
         // potentially removes just added score
-        while (idsByScore.size > TOP_SIZE) {
+        while (scoresById.size > TOP_SIZE) {
             val firstEntry = idsByScore.firstEntry()
             val idsToRemove = firstEntry.value
             if (!idsToRemove.isNullOrEmpty()) {
@@ -83,13 +83,12 @@ class TopManager {
 
     fun getTop(): List<Candidate> {
         val topCandidates = mutableListOf<Candidate>()
-
         idsByScore.descendingMap().forEach { (score, ids) ->
             ids.forEach { id ->
                 topCandidates.add(Candidate(id, score))
             }
         }
-
+        println("TopManager.getTop, current size: ${topCandidates.size}")
         return topCandidates
     }
 }
@@ -119,7 +118,6 @@ class CGMapFn : RichFlatMapFunction<AggregatedEvent, CandidateList>() {
     }
 }
 
-// [ ] TODO! write code here
 // combine-style intermediate aggregation
 class CGSumFn : ReduceFunction<CandidateList> {
     override fun reduce(value1: CandidateList, value2: CandidateList): CandidateList {
@@ -175,24 +173,24 @@ class CGProcessEventsFn :
 class CGElementConverter : ElementConverter<CandidateList, DynamoDbWriteRequest> {
 
     override fun apply(candidates: CandidateList, context: SinkWriter.Context): DynamoDbWriteRequest {
-        // Convert each Candidate into a Map of AttributeValue
-        val candidatesAttributeValue: Map<String, AttributeValue> = candidates.candidates.map { candidate ->
-            mapOf(
+        // Convert each Candidate into a Map of AttributeValue, then into AttributeValue.M (a DynamoDB Map)
+        val candidatesAttributeValues: List<AttributeValue> = candidates.candidates.map { candidate ->
+            val candidateMap = mapOf(
                 "mediaId" to AttributeValue.builder().s(candidate.mediaId).build(),
                 "score" to AttributeValue.builder().n(candidate.score.toString()).build()
             )
-        }.mapIndexed { index, candidateMap ->
-            // Use index as a key to ensure unique keys for each candidate in the map
-            index.toString() to AttributeValue.builder().m(candidateMap).build()
-        }.toMap()
+            // Convert the map into an AttributeValue object representing a DynamoDB Map
+            AttributeValue.builder().m(candidateMap).build()
+        }
 
-        // Wrap the candidates in another map under the key "Candidates"
+        // Now, instead of wrapping the candidates in a map, create an AttributeValue list (L)
         val item = hashMapOf<String, AttributeValue>(
             "CGName" to AttributeValue.builder().s("TopViews").build(),
-            "Candidates" to AttributeValue.builder().m(candidatesAttributeValue).build()
+            "Candidates" to AttributeValue.builder().l(candidatesAttributeValues).build() // This creates a list type
         )
+
         println("Writing ${item} to dynamodb")
-        // Create and return the DynamoDbWriteRequest
+        // Create and return the DynamoDbWriteRequest with the modified structure
         return DynamoDbWriteRequest.builder()
             .setType(DynamoDbWriteRequestType.PUT)
             .setItem(item)
