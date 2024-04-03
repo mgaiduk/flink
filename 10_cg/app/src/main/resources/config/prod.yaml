@@ -5,3 +5,4 @@ source:
 sink:
   awsRegion: "us-east-1"
   tableName: "flink-test"
+  cgTableName: "flink-test-cg"

@@ -21,7 +21,7 @@ export class CdkStack extends Stack {
       streamName: `flink-test`,
     });
 
-    const dynamodbSink = new dynamodb.Table(this, 'community-feed-table', {
+    const dynamodbSink = new dynamodb.Table(this, 'features-table', {
       tableName: `flink-test`,
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
 
@@ -41,12 +41,29 @@ export class CdkStack extends Stack {
       pointInTimeRecovery: false,
     });
 
+    const dynamodbCGSink = new dynamodb.Table(this, 'cg-table', {
+      tableName: `flink-test-cg`,
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+
+      partitionKey: {
+        name: 'CGName',
+        type: dynamodb.AttributeType.STRING,
+      },
+
+      removalPolicy: RemovalPolicy.DESTROY,
+
+      timeToLiveAttribute: 'ttl',
+
+      pointInTimeRecovery: false,
+    });
+
     const flinkRole = new iam.Role(this, 'ApplicationRole', {
       assumedBy: new iam.ServicePrincipal('kinesisanalytics.amazonaws.com'),
       roleName: `flink-cdk-test-role`,
     });
 
     dynamodbSink.grantWriteData(flinkRole);
+    dynamodbCGSink.grantWriteData(flinkRole);
     signalStream.grantRead(flinkRole);
 
     const projectRoot = __dirname.split('/lib')[0];
