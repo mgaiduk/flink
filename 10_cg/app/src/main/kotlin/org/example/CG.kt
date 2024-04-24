@@ -22,7 +22,7 @@ import kotlinx.serialization.Transient
 import java.util.TreeMap
 
 val TOP_SIZE = 2
-val FEATURE_NAME = "like"
+val FEATURE_NAME = "view"
 val DECAY_INTERVAL: Long = 15
 
 @Serializable
@@ -112,6 +112,7 @@ class CGMapFn : RichFlatMapFunction<AggregatedEvent, TopManager>() {
     private var topManager = TopManager()
 
     override fun flatMap(event: AggregatedEvent, out: Collector<TopManager>) {
+        println("CGMapFn event: ${event}")
         if (topManager == null) {
             topManager = TopManager()
         }
@@ -130,6 +131,7 @@ class CGMapFn : RichFlatMapFunction<AggregatedEvent, TopManager>() {
             result.consumeCandidate(candidate)
             out.collect(result)
         }
+        println("CGMapFn ended; event: ${event}")
     }
 }
 
@@ -171,10 +173,12 @@ class CGProcessEventsFn :
         candidateLists: Iterable<TopManager>,
         collector: Collector<TopManager>
     ) {
+        println("CGProcessEventsFn started")
         val state: ListState<Candidate> = context.globalState().getListState(stateDescriptor)
 
         val topManager = TopManager()
         state.get().forEach {candidate ->
+            println("CGProcessEventsFn candidate: ${candidate}")
             topManager.consumeCandidate(candidate)
         }
         candidateLists.forEach {candidates ->
@@ -184,6 +188,7 @@ class CGProcessEventsFn :
         }
         state.update(topManager.getTop())
         collector.collect(topManager)
+        println("CGProcessEventsFn ended, topManager: ${topManager}")
     }
 }
 
@@ -193,6 +198,7 @@ class CGElementConverter : ElementConverter<TopManager, DynamoDbWriteRequest> {
     override fun apply(candidates: TopManager, context: SinkWriter.Context): DynamoDbWriteRequest {
         // Convert each Candidate into a Map of AttributeValue, then into AttributeValue.M (a DynamoDB Map)
         val candidatesAttributeValues: List<AttributeValue> = candidates.getTop().map { candidate ->
+            println("CGElementConverter started, candidates: ${candidates}")
             val candidateMap = mapOf(
                 "mediaId" to AttributeValue.builder().s(candidate.mediaId).build(),
                 "score" to AttributeValue.builder().n(candidate.score.toString()).build()

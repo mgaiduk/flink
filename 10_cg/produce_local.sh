@@ -18,15 +18,14 @@ fi
 while IFS= read -r line
 do
     # Encode the line in base64
-    encodedData=$(echo -n "$line" | base64)
+    encodedData=$(echo -n "$line")
 
     # Use AWS CLI to send the record to Kinesis
-    aws kinesis put-record  --region "$REGION" \
+    AWS_ACCESS_KEY_ID="your_access_key" AWS_SECRET_ACCESS_KEY="your_secret_key" aws kinesis put-record  --region "$REGION" \
         --endpoint-url "$ENDPOINT_URL" \
         --stream-name "$STREAM_NAME" \
         --partition-key "$PARTITION_KEY" \
         --data "$encodedData"
-        # --profile "$PROFILE" \
         
 
     # Check if the AWS CLI command was successful

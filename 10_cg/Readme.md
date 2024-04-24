@@ -1,3 +1,5 @@
+Setup instructions: [link](setup.md)
+
 In the previous tutorial, we've built a "counter machine", that can be used to generate all sorts of counter-based features to be used in our recommender system.
 When using these features, at request time, the web service responsible for feed generation will have to fetch features for the user and a list of posts.
 
