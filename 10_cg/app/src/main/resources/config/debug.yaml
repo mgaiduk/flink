@@ -7,6 +7,8 @@ source:
   datastreamName: "flink-test"
   kinesaliteTimestampFix: True
 sink:
+  awsAccessKeyId: "dummy"
+  awsSecretAccessKey: "dummly"
   awsRegion: "us-east-1"
   awsEndpoint: "http://localhost:8000"
   tableName: "flink-test"

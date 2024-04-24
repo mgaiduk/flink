@@ -55,6 +55,8 @@ data class SourceConfig(
 data class SinkConfig(
     val awsEndpoint: String?,
     val awsRegion: String?,
+    val awsAccessKeyId: String?,
+    val awsSecretAccessKey: String?,
     val tableName: String,
     val cgTableName: String,
 )
@@ -175,6 +177,12 @@ fun defineWorkflow(
     }
     if (config.sink.awsRegion != null) {
         properties[AWSConfigConstants.AWS_REGION] = config.sink.awsRegion
+    }
+    if (config.sink.awsAccessKeyId != null) {
+        properties[AWSConfigConstants.AWS_ACCESS_KEY_ID] = config.sink.awsAccessKeyId
+    }
+    if (config.sink.awsSecretAccessKey != null) {
+        properties[AWSConfigConstants.AWS_SECRET_ACCESS_KEY] = config.sink.awsSecretAccessKey
     }
 
     val countersSink = DynamoDbSink.builder<AggregatedEvent>()
